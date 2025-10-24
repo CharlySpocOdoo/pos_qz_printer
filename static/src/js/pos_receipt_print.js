@@ -92,31 +92,78 @@ var printer_name = null;
         location.reload();
     }
 
+
+
+
 patch(PosStore.prototype, {
     async printReceipt(order = this.get_order()) {
         const el = await this.printer.renderer.toHtml(OrderReceipt, {
-                data: this.orderExportForPrinting(order),
-                formatCurrency: this.env.utils.formatCurrency,
-            })
-        data_to_print = el.outerText
-        company_id = order.company_id.id;
-        const response = await this.data.call('res.company', 'read', [company_id]);
-        if (response){
-            printer_name = response[0].pos_printer
-            startConnection()
-        }
-        else{
-            await this.printer.print(
-                OrderReceipt,
-                {
-                    data: this.orderExportForPrinting(order),
-                    formatCurrency: this.env.utils.formatCurrency,
-                },
-                { webPrintFallback: true }
-            );
-            const nbrPrint = order.nb_print;
-            await this.data.write("pos.order", [order.id], { nb_print: nbrPrint + 1 });
-            return true;
-        }
+            data: this.orderExportForPrinting(order),
+            formatCurrency: this.env.utils.formatCurrency,
+        });
+
+        // ======================
+        // FORMATO ESC/POS
+        // ======================
+        const ESC = '\x1B';
+        const GS  = '\x1D';
+        const data = [];
+
+        // Inicializar impresora
+        data.push(ESC + '@');
+
+        // LOGO (si está almacenado en la impresora como NV logo #1)
+        data.push(ESC + 'a' + '\x01'); // Centrado
+        data.push('\x1C\x70\x01\x00'); // Imprimir logo #1
+
+        // Encabezado
+        data.push(ESC + '!' + '\x30'); // Doble alto/ancho
+        data.push('ROSA DE LIMA\n');
+        data.push(ESC + '!' + '\x00'); // Texto normal
+        data.push('--------------------------------\n');
+
+        // Datos del ticket
+        const cashier = order.get_cashier()?.name || '-';
+        const date = luxon.DateTime.now().toFormat('dd/MM/yyyy HH:mm');
+        data.push(`Ticket: ${order.name}\n`);
+        data.push(`Cajero: ${cashier}\n`);
+        data.push(`Fecha: ${date}\n`);
+        data.push('--------------------------------\n');
+
+        // Productos
+        order.get_orderlines().forEach(line => {
+            const ref = line.defaultCode ? `${line.defaultCode}\n` : '';
+            const name = line.product_name.slice(0, 30);
+            const price = line.get_display_price().toFixed(2);
+            data.push(ref); // Referencia interna arriba
+            data.push(`${name}\n`);
+            data.push(`   $${price}\n`);
+        });
+
+        // Totales
+        data.push('--------------------------------\n');
+        data.push(ESC + 'E' + '\x01'); // Negrita ON
+        data.push('TOTAL:           $' + order.get_total_with_tax().toFixed(2) + '\n');
+        data.push(ESC + 'E' + '\x00'); // Negrita OFF
+        data.push('--------------------------------\n');
+
+        // Mensaje final
+        data.push(ESC + 'a' + '\x01'); // Centrado
+        data.push('¡Gracias por su compra!\n');
+        data.push('--------------------------------\n');
+
+        // Corte de papel
+        data.push('\n\n');
+        data.push(GS + 'V' + '\x41'); // Corte parcial
+
+        // Configuración e impresión
+        const config = qz.configs.create(null);
+        config.reconfigure({ copies: 1, margins: { top: 0, left: 0 } });
+
+        await qz.print(config, data)
+            .then(() => console.log('✅ Ticket impreso correctamente'))
+            .catch(e => console.error('❌ Error al imprimir:', e));
+
+        location.reload();
     }
 });
